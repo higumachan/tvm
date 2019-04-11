@@ -26,7 +26,11 @@ import onnx
 from onnx import helper, TensorProto
 import unittest
 
+from python.tvm.relay.frontend import from_onnx
+
+
 def get_tvm_output(graph_def, input_data, target, ctx, output_shape=None, output_dtype='float32'):
+
     """ Generic function to execute and get tvm output"""
     target = 'llvm'
     if isinstance(input_data, list):
@@ -715,6 +719,67 @@ def test_constantfill():
     verify_constantfill(True, (2, 3, 4, 5), (2, 3, 4, 5), 10, 'float32')
     verify_constantfill(False, (2, 3, 4, 5), (2, 3, 4, 5), 10, 'float32')
     verify_constantfill(True, (2, 3, 4, 5), (2, 3, 4, 5, 4, 5, 6), 10, 'float32', extra_shape=(4, 5, 6))
+
+
+def get_conv_outsize(size, k, s, p, cover_all=False, d=1):
+    dk = k + (k - 1) * (d - 1)
+    if cover_all:
+        return (size + p * 2 - dk + s - 1) // s + 1
+    else:
+        return (size + p * 2 - dk) // s + 1
+
+
+def im2col_cpu(img, kh, kw, sy, sx, ph, pw, pval=0, ceil_mode=False, dy=1, dx=1):
+    n, c, h, w = img.shape
+    out_h = get_conv_outsize(h, kh, sy, ph, ceil_mode, dy)
+    out_w = get_conv_outsize(w, kw, sx, pw, ceil_mode, dx)
+
+    img = np.pad(img,
+                    ((0, 0), (0, 0), (ph, ph + sy - 1), (pw, pw + sx - 1)),
+                    mode='constant', constant_values=(pval,))
+    col = np.ndarray((n, c, kh, kw, out_h, out_w), dtype=img.dtype)
+
+    for j in range(kh):
+        jdy = j * dy
+        j_lim = jdy + sy * out_h
+        for i in range(kw):
+            idx = i * dx
+            i_lim = idx + sx * out_w
+            col[:, :, j, i, :, :] = img[:, :, jdy:j_lim:sy, idx:i_lim:sx]
+
+    return col
+
+
+def verify_max_pool(indata, kernel_shape, pads, strides, storage_order):
+    col = im2col_cpu(indata, kernel_shape[0], kernel_shape[1], strides[0], strides[1], pads[2], pads[3], ceil_mode=False)
+    n, c, kh, kw, out_h, out_w = col.shape
+    col = col.reshape((n, c, kh * kw, out_h, out_w))
+    outdata = col.max(axis=2)
+
+    #  onnx graph
+    node = helper.make_node(
+        'MaxPool',
+        inputs=['input'],
+        outputs=['output'],
+        kernel_shape=kernel_shape,
+        pads=pads,
+        strides=strides,
+        storage_order=storage_order,
+    )
+    graph = helper.make_graph([node],
+                              'max_pool_test',
+                              inputs = [helper.make_tensor_value_info("input",
+                                            TensorProto.FLOAT, list(indata.shape))],
+                              outputs = [helper.make_tensor_value_info("output",
+                                            TensorProto.FLOAT, list(outdata.shape))])
+    model = helper.make_model(graph, producer_name='max_pool_test')
+    for target, ctx in ctx_list():
+        tvm_out = get_tvm_output(model, indata, target, ctx, outdata.shape, 'float32')
+        tvm.testing.assert_allclose(outdata, tvm_out, rtol=1e-5, atol=1e-5)
+
+
+def test_max_pool_make():
+    verify_max_pool(np.random.randn(2, 2).astype(np.float32), [2, 2], [0, 0, 1, 1], [2, 2], 0)
 
 
 def verify_pad(indata, pads, value=0.0):
