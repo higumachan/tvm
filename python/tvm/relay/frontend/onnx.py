@@ -103,9 +103,9 @@ class Pool(OnnxOpConverter):
                 'pads': ('padding', (0, 0), revert_caffe2_pad)
             },
             # very weird attributes here in onnx, force check
-            ignores=['dilations'],
+            ignores=['dilations', 'storage_order'],
             # TODO(zhreshold): make sure ceil_mode in onnx, and layout?
-            extras={'ceil_mode': False},
+            extras={'ceil_mode': True},
             custom_check=dimension_constraint())(inputs, attr, params)
 
 
